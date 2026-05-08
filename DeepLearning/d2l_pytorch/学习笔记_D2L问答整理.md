@@ -15,6 +15,9 @@
   - [引言 (index.ipynb)](#引言-indexipynb)
   - [线性回归基础 (linear-regression.ipynb)](#线性回归基础-linear-regressionipynb)
   - [线性回归从零实现 (linear-regression-scratch.ipynb)](#线性回归从零实现-linear-regression-scratchipynb)
+  - [线性回归简洁实现 (linear-regression-concise.ipynb)](#线性回归简洁实现-linear-regression-conciseipynb)
+  - [线性回归简洁实现 (linear-regression-concise.ipynb)](#线性回归简洁实现-linear-regression-conciseipynb)
+  - [softmax回归理论 (softmax-regression.ipynb)](#softmax回归理论-softmax-regressionipynb)
 
 ---
 
@@ -1658,6 +1661,773 @@ PyTorch知道这些，你调用backward()它自动应用！
 
 原因：对称性问题
 解决：随机初始化权重，打破对称性
+```
+
+---
+
+### 线性回归简洁实现 (linear-regression-concise.ipynb)
+
+#### Q1: PyTorch高级API的核心组件
+
+| 组件 | 作用 | 替代的从零实现代码 |
+|------|------|------------------|
+| `nn.Sequential` | 定义网络结构 | 手写linreg函数 |
+| `nn.Linear` | 定义线性层 | 手写matmul+广播 |
+| `nn.MSELoss` | 定义损失函数 | 手写squared_loss |
+| `torch.optim.SGD` | 定义优化器 | 手写sgd函数 |
+| `DataLoader` | 批量数据迭代 | 手写data_iter |
+
+---
+
+#### Q2: nn.Sequential详解
+
+```python
+net = nn.Sequential(nn.Linear(2, 1))
+
+解释：
+  → nn.Sequential：按顺序组合多个层
+  → nn.Linear(2, 1)：输入2维，输出1维的线性层
+  → 自动包含权重w和偏置b
+
+内部结构：
+  net[0] → 第0层（nn.Linear）
+    net[0].weight → 权重矩阵，shape=(1, 2)
+    net[0].bias → 偏置向量，shape=(1,)
+```
+
+---
+
+#### Q3: DataLoader和TensorDataset
+
+```python
+from torch.utils import data
+
+# TensorDataset：将特征和标签打包
+dataset = data.TensorDataset(features, labels)
+
+# DataLoader：批量迭代器
+data_iter = data.DataLoader(dataset, batch_size, shuffle=True)
+
+# 使用
+for X, y in data_iter:
+    # 每次返回一个batch的数据
+```
+
+**对比从零实现的data_iter：**
+
+| 方式 | 优点 |
+|------|------|
+| 从零实现 | 理解底层原理，灵活定制 |
+| DataLoader | 高效、GPU支持、多线程加载 |
+
+---
+
+#### Q4: trainer.zero_grad()为什么放在l.backward()之前？
+
+**核心原因：PyTorch默认累加梯度**
+
+```python
+# 错误顺序（梯度累加）
+l.backward()          # 计算梯度，累加到.grad
+trainer.step()        # 用累加梯度更新参数
+trainer.zero_grad()   # 清零梯度（晚了！）
+
+问题：下次backward会累加到上次的梯度上！
+```
+
+```python
+# 正确顺序（梯度独立）
+trainer.zero_grad()   # 先清零上次的梯度
+l.backward()          # 计算本次梯度（从0开始）
+trainer.step()        # 用本次梯度更新参数
+```
+
+**梯度累加演示：**
+
+```python
+# PyTorch默认行为
+x = torch.tensor([1.0], requires_grad=True)
+
+# 第1次backward
+y1 = x * 2
+y1.backward()
+print(x.grad)  # tensor([2.])  ← 梯度=2
+
+# 第2次backward（不清零）
+y2 = x * 3
+y2.backward()
+print(x.grad)  # tensor([5.])  ← 梯度=2+3=5（累加！）
+
+# 正确做法：每次backward前zero_grad
+x.grad.zero_()
+y3 = x * 4
+y3.backward()
+print(x.grad)  # tensor([4.])  ← 梯度=4（正确）
+```
+
+**为什么PyTorch默认累加？**
+
+```
+好处：
+  → 支持梯度累积（batch太小时，累积多个batch再更新）
+  → 支持多任务学习（多个损失函数的梯度累加）
+  → 灵活性更高
+
+代价：
+  → 需要手动清零
+  → 不清零会导致梯度错误
+```
+
+---
+
+#### Q5: 训练循环对比
+
+**从零实现：**
+
+```python
+for epoch in range(num_epochs):
+    for X, y in data_iter(batch_size, features, labels):
+        l = loss(net(X, w, b), y)
+        l.sum().backward()
+        sgd([w, b], lr, batch_size)
+```
+
+**简洁实现：**
+
+```python
+for epoch in range(num_epochs):
+    for X, y in data_iter:
+        l = loss(net(X), y)
+        trainer.zero_grad()  # 清零梯度
+        l.backward()         # 反向传播
+        trainer.step()       # 更新参数
+```
+
+| 差异点 | 从零实现 | 简洁实现 |
+|--------|---------|---------|
+| 调用net | `net(X, w, b)` | `net(X)` |
+| 梯度计算 | `l.sum().backward()` | `l.backward()` |
+| 参数更新 | 手写sgd函数 | `trainer.step()` |
+| 梯度清零 | 在sgd中完成 | 显式调用`zero_grad()` |
+
+---
+
+#### 练习解答
+
+**练习1：如果用损失总和而非平均值**
+
+```
+问题1：有什么影响？
+
+损失总和：
+  l = Σᵢ (ŷ_i - y_i)² / 2
+
+梯度：
+  ∂l/∂w = Σᵢ x_i × (ŷ_i - y_i)  ← 累加，不是平均
+
+影响：
+  → 梯度放大了batch_size倍
+  → 参数更新幅度变大
+  → 需要调整学习率：η' = η / batch_size
+
+nn.MSELoss(reduction='sum')用法：
+  → 损失求和而非平均
+  → 需要手动调整学习率
+```
+
+**练习2：PyTorch损失函数和初始化**
+
+```
+问题2.1：其他损失函数
+
+| 损失函数 | 用途 | 公式 |
+|---------|------|------|
+| nn.L1Loss | 回归，对异常值鲁棒 | Σ|ŷ-y| |
+| nn.SmoothL1Loss | Huber损失 | 小误差平方，大误差绝对值 |
+| nn.CrossEntropyLoss | 分类 | -Σy×log(ŷ) |
+
+nn.SmoothL1Loss（Huber损失）：
+  当|ŷ-y| < δ：l = ½(ŷ-y)²
+  当|ŷ-y| > δ：l = δ|ŷ-y| - ½δ²
+
+  特点：
+    → 误差小时光滑（像MSE）
+    → 误差大时鲁棒（像L1）
+    → 默认δ=1.0
+```
+
+```
+问题2.2：权重初始化方法
+
+| 初始化方法 | 适用场景 |
+|-----------|---------|
+| 随机初始化 | 一般情况 |
+| Xavier初始化 | tanh/sigmoid激活 |
+| Kaiming初始化 | ReLU激活 |
+| 预训练权重 | 迁移学习 |
+
+PyTorch内置：
+  nn.init.normal_(net[0].weight, mean=0, std=0.01)
+  nn.init.zeros_(net[0].bias)
+  nn.init.xavier_uniform_(net[0].weight)
+  nn.init.kaiming_normal_(net[0].weight)
+```
+
+**练习3：访问梯度**
+
+```python
+# 访问权重梯度
+print(net[0].weight.grad)  # shape=(1, 2)
+
+# 访问偏置梯度
+print(net[0].bias.grad)    # shape=(1,)
+
+# 训练后查看梯度
+for epoch in range(num_epochs):
+    for X, y in data_iter:
+        trainer.zero_grad()
+        l = loss(net(X), y)
+        l.backward()
+        trainer.step()
+
+    print(f'weight.grad: {net[0].weight.grad}')
+    print(f'bias.grad: {net[0].bias.grad}')
+```
+
+---
+
+### softmax回归理论 (softmax-regression.ipynb)
+
+#### softmax回归核心概念
+
+**回归 vs 分类：**
+
+| 问题类型 | 回答的问题 | 例子 |
+|---------|-----------|------|
+| 回归 | "多少？" | 房价、胜场数、住院天数 |
+| 分类 | "哪一个？" | 垃圾邮件判断、图像分类 |
+
+---
+
+#### Q1: 独热编码是什么？
+
+**定义：** 用向量表示类别，正确类别位置为1，其余为0
+
+```
+例子：猫、鸡、狗三个类别
+
+猫 → (1, 0, 0)
+鸡 → (0, 1, 0)
+狗 → (0, 0, 1)
+
+特点：
+  → 向量长度 = 类别数量
+  → 只有一个位置是1
+  → 其余位置都是0
+```
+
+**为什么不用整数编码（1, 2, 3）？**
+
+```
+整数编码的问题：
+  → 类别之间没有自然顺序
+  → 猫=1, 鸡=2, 狗=3 没有大小关系
+  → 模型可能误解为"猫 < 鸡 < 狗"
+
+独热编码优势：
+  → 每个类别独立表示
+  → 不暗示任何顺序关系
+  → 适合无序分类问题
+```
+
+---
+
+#### Q2: 为什么需要softmax运算？
+
+**问题：线性输出不能直接作为概率**
+
+线性输出 $o$ 存在两个问题：
+
+1. **没有约束总和为1**：输出可能和为2、3或其他值
+2. **可能为负值**：概率不能为负
+
+这违反了概率的基本公理！
+
+**softmax函数解决方案：**
+
+$$\hat{y}_j = \frac{\exp(o_j)}{\sum_k \exp(o_k)}$$
+
+```
+作用：
+  → exp(o_j)：确保非负（指数函数值>0）
+  → 除以总和：确保总和为1
+  → 保持可导性：方便反向传播
+```
+
+**数值例子：**
+
+```
+未规范化输出：o = (2.0, 1.0, 0.1)
+
+计算过程：
+  exp(o₁) = e²·⁰ ≈ 7.389
+  exp(o₂) = e¹·⁰ ≈ 2.718
+  exp(o₃) = e⁰·¹ ≈ 1.105
+  总和 = 7.389 + 2.718 + 1.105 ≈ 11.212
+
+softmax输出：
+  ŷ₁ = 7.389/11.212 ≈ 0.659
+  ŷ₂ = 2.718/11.212 ≈ 0.242
+  ŷ₃ = 1.105/11.212 ≈ 0.099
+
+验证：总和 = 0.659 + 0.242 + 0.099 = 1.0 ✓
+```
+
+---
+
+#### Q3: softmax不改变大小顺序
+
+**重要性质：**
+
+$$\operatorname*{argmax}_j \hat{y}_j = \operatorname*{argmax}_j o_j$$
+
+```
+含义：
+  → softmax前最大的o，softmax后对应的ŷ也最大
+  → 预测类别时，直接看最大的o即可
+
+原因：
+  → 指数函数是单调递增的
+  → o₁ > o₂ → exp(o₁) > exp(o₂)
+  → 除以同一个总和，顺序不变
+```
+
+---
+
+#### Q4: 交叉熵损失公式推导
+
+**从极大似然估计出发：**
+
+```
+假设：模型输出ŷ是每个类别的条件概率
+
+似然函数：
+  P(Y|X) = ∏ᵢ P(y⁽ⁱ⁾|x⁽ⁱ⁾)
+
+负对数似然（最小化目标）：
+  -log P(Y|X) = Σᵢ -log P(y⁽ⁱ⁾|x⁽ⁱ⁾)
+              = Σᵢ l(y⁽ⁱ⁾, ŷ⁽ⁱ⁾)
+```
+
+**交叉熵损失定义：**
+
+$$l(\mathbf{y}, \hat{\mathbf{y}}) = - \sum_{j=1}^q y_j \log \hat{y}_j$$
+
+```
+独热编码的特殊性：
+  → y = (0, 0, 1) 表示真实类别是第3类
+  → 只有y₃=1，其他y₁=y₂=0
+  → 求和时只有一项不为零
+
+简化公式：
+  l(y, ŷ) = -log ŷ_correct
+  其中ŷ_correct是真实类别的预测概率
+```
+
+**数值例子：**
+
+```
+真实标签：y = (0, 0, 1)（狗）
+预测概率：ŷ = (0.1, 0.2, 0.7)
+
+交叉熵损失：
+  l = -[0×log(0.1) + 0×log(0.2) + 1×log(0.7)]
+    = -log(0.7)
+    ≈ 0.357
+
+解释：
+  → 预测概率越高（接近1），损失越低（接近0）
+  → 预测概率越低（接近0），损失越高（很大）
+```
+
+---
+
+#### Q5: softmax导数 = 预测 - 真实
+
+**将softmax代入交叉熵损失：**
+
+$$l(\mathbf{y}, \hat{\mathbf{y}}) = \log \sum_{k=1}^q \exp(o_k) - \sum_{j=1}^q y_j o_j$$
+
+**对$o_j$的导数：**
+
+$$\frac{\partial l}{\partial o_j} = \frac{\exp(o_j)}{\sum_{k=1}^q \exp(o_k)} - y_j = \mathrm{softmax}(\mathbf{o})_j - y_j$$
+
+```
+直观理解：
+  → 导数 = 预测概率 - 真实标签
+  → 与线性回归中 梯度 = 预测值 - 真实值 类似！
+
+为什么这么简洁？
+  → 这是指数族分布的普遍性质
+  → softmax属于指数族分布
+  → 所有指数族分布的对数似然梯度都有这种形式
+```
+
+**数值例子：**
+
+```
+真实标签：y = (0, 0, 1)
+softmax输出：ŷ = (0.1, 0.2, 0.7)
+未规范化输出：o = (2.0, 1.0, 0.1)
+
+梯度计算：
+  ∂l/∂o₁ = ŷ₁ - y₁ = 0.1 - 0 = 0.1
+  ∂l/∂o₂ = ŷ₂ - y₂ = 0.2 - 0 = 0.2
+  ∂l/∂o₃ = ŷ₃ - y₃ = 0.7 - 1 = -0.3
+
+含义：
+  → 正确类别的梯度为负 → 需要增加o₃
+  → 错误类别的梯度为正 → 需要减少o₁、o₂
+```
+
+---
+
+#### Q6: 信息论基础概念
+
+**熵（Entropy）：**
+
+$$H[P] = \sum_j - P(j) \log P(j)$$
+
+```
+含义：
+  → 量化分布P的不确定性
+  → 越不确定，熵越大
+  → 完全确定（只有一个事件概率为1），熵=0
+
+例子：
+  → 确定性事件：P = (1, 0, 0)，H = 0
+  → 完全不确定：P = (1/3, 1/3, 1/3)，H最大
+
+单位：
+  → 底为e：纳特（nat）
+  → 底为2：比特（bit）
+  → 1纳特 ≈ 1.44比特
+```
+
+**信息量：**
+
+$$\text{信息量} = -\log P(j)$$
+
+```
+含义：
+  → 事件发生的"惊异程度"
+  → 概率低的事件 → 信息量大（更惊异）
+  → 概率高的事件 → 信息量小（不惊异）
+
+例子：
+  → 确定事件P=1：信息量=0（不惊异）
+  → 稀有事件P=0.01：信息量≈4.6（很惊异）
+```
+
+**交叉熵：**
+
+$$H(P, Q) = -\sum_j P(j) \log Q(j)$$
+
+```
+含义：
+  → 用概率分布Q编码来自分布P的数据所需平均比特数
+  → "主观概率为Q的观察者看到根据P生成的数据时的预期惊异"
+
+重要性质：
+  → H(P, Q) ≥ H(P)
+  → 当P=Q时，交叉熵最小，等于熵H(P)
+```
+
+**交叉熵损失的理解：**
+
+```
+两种理解方式：
+
+1. 统计角度：极大似然估计
+   → 最小化负对数似然
+   → 让模型预测概率与真实分布匹配
+
+2. 信息论角度：最小化惊异
+   → 用模型预测Q编码真实标签P
+   → 让预测越准确，惊异越小
+```
+
+---
+
+#### Q7: 小批量样本的矢量化
+
+**维度说明：**
+
+```
+样本数：n
+特征维度：d
+类别数：q
+
+矩阵形状：
+  X ∈ ℝ^(n×d)  → 特征矩阵
+  W ∈ ℝ^(d×q)  → 权重矩阵
+  b ∈ ℝ^(q)    → 偏置向量
+```
+
+**矩阵运算：**
+
+$$
+\begin{aligned}
+\mathbf{O} &= \mathbf{X} \mathbf{W} + \mathbf{b} \\
+\hat{\mathbf{Y}} &= \mathrm{softmax}(\mathbf{O})
+\end{aligned}
+$$
+
+```
+运算过程：
+  → O = X×W + b（形状：n×q）
+  → 每行是一个样本的未规范化输出
+  → softmax按行执行（每行独立归一化）
+```
+
+---
+
+#### 练习解答
+
+| 练习 | 核心答案 |
+|------|---------|
+| 练习1 | softmax交叉熵二阶导数 = softmax方差 |
+| 练习2 | 三等概率编码问题 → 联合编码效率更高 |
+| 练习3 | RealSoftMax证明 → soft-min类似定义 |
+
+**练习1详解：softmax交叉熵的二阶导数**
+
+```
+问题1.1：计算二阶导数
+
+已知一阶导数：
+  ∂l/∂o_j = softmax(o)_j - y_j
+
+二阶导数（Hessian矩阵）：
+  ∂²l/∂o_i∂o_j = ∂/∂o_i [softmax(o)_j - y_j]
+
+  = ∂softmax(o)_j/∂o_i
+
+  因为y_j是常数，导数为0
+
+softmax的导数：
+  当i = j时：
+    ∂softmax_j/∂o_j = softmax_j × (1 - softmax_j)
+
+  当i ≠ j时：
+    ∂softmax_j/∂o_i = -softmax_j × softmax_i
+
+验证：
+  softmax_j = exp(o_j)/Σexp(o_k)
+
+  对o_j求导（i=j）：
+    = exp(o_j)/Σexp × [Σexp - exp(o_j)]/Σexp
+    = softmax_j × (1 - softmax_j)
+
+  对o_i求导（i≠j）：
+    = -exp(o_j)×exp(o_i)/(Σexp)²
+    = -softmax_j × softmax_i
+```
+
+```
+问题1.2：验证方差关系
+
+softmax分布的方差：
+  Var(X) = E[X²] - E[X]²
+
+  对于softmax输出：
+    E[X_j] = softmax_j（期望）
+    E[X_j²] = softmax_j（因为是伯努利）
+
+  方差：
+    Var_j = softmax_j - softmax_j²
+          = softmax_j × (1 - softmax_j)
+
+这与二阶导数中i=j的情况相同！
+
+结论：
+  → Hessian矩阵的对角元素 = softmax分布的方差
+  → 不对角元素 = -softmax_j × softmax_i（协方差）
+```
+
+---
+
+**练习2详解：三等概率编码问题**
+
+```
+问题2.1：二进制编码的问题
+
+三个类别概率相等：P = (1/3, 1/3, 1/3)
+
+尝试二进制编码：
+  → 每个类别用固定长度二进制码
+  → 3个类别至少需要2位（能表示4个状态）
+  → 类别编码：00, 01, 10（剩11未用）
+
+熵计算：
+  H(P) = -3 × (1/3) × log(1/3) = log(3) ≈ 1.585纳特
+
+二进制编码效率：
+  → 每个事件用2位 = 2比特 ≈ 1.386纳特
+  → 1.386 < 1.585
+  → 这违反了信息论基本定理！
+
+问题：
+  → 平均编码长度 < 熵是不可能的理论上
+  → 但实际我们用了2位固定长度
+  → 效率浪费：2 - 1.585 = 0.415纳特/事件
+```
+
+```
+问题2.2：更好的编码方法
+
+方法1：联合编码两个观察
+
+考虑两个独立观察：
+  → P(x₁, x₂) = P(x₁) × P(x₂)
+  → 共有9种组合，概率都是1/9
+
+熵：
+  H(P₂) = 2 × log(3) ≈ 3.17纳特
+
+编码9种状态：
+  → 需要4位二进制（能表示16种状态）
+  → 平均编码长度 = 4/2 = 2位/观察 = 1.386纳特/观察
+
+改进：
+  → 从1.386纳特提升到接近熵1.585纳特
+  → 但仍有浪费
+
+方法2：联合编码n个观察
+
+编码n个观察：
+  → 共有3ⁿ种组合
+  → 需要⌈log₂(3ⁿ)⌉位
+
+平均编码长度：
+  bits/观察 = ⌈n × log₂(3)⌉ / n
+
+当n→∞：
+  → ⌈n × log₂(3)⌉ / n → log₂(3) ≈ 1.585比特
+  → 逼近熵的极限！
+
+结论：
+  → 联合编码越多观察，效率越高
+  → 大数定律保证组合分布趋于均匀
+  → 可以设计接近最优的编码
+```
+
+---
+
+**练习3详解：RealSoftMax证明**
+
+```
+RealSoftMax定义：
+  RealSoftMax(a, b) = log(exp(a) + exp(b))
+
+问题3.1：证明 > max(a, b)
+
+证明：
+  exp(a) > 0 且 exp(b) > 0（指数函数性质）
+
+  exp(a) + exp(b) > exp(a) 且 > exp(b)
+
+  取log：
+    log(exp(a) + exp(b)) > log(exp(a)) = a
+    log(exp(a) + exp(b)) > log(exp(b)) = b
+
+  所以：RealSoftMax(a, b) > max(a, b) ✓
+```
+
+```
+问题3.2：证明 λ⁻¹ RealSoftMax(λa, λb) > max(a, b)
+
+设λ > 0：
+
+λ⁻¹ RealSoftMax(λa, λb)
+  = λ⁻¹ × log(exp(λa) + exp(λb))
+
+由问题3.1：
+  RealSoftMax(λa, λb) > max(λa, λb)
+  = λ × max(a, b)（因为λ > 0）
+
+所以：
+  λ⁻¹ × RealSoftMax(λa, λb) > λ⁻¹ × λ × max(a, b)
+  = max(a, b) ✓
+```
+
+```
+问题3.3：证明λ→∞时趋于max(a, b)
+
+设a > b（不失一般性）：
+
+λ⁻¹ RealSoftMax(λa, λb)
+  = λ⁻¹ × log(exp(λa) + exp(λb))
+  = λ⁻¹ × log(exp(λa) × (1 + exp(λ(b-a))))
+  = λ⁻¹ × [λa + log(1 + exp(λ(b-a)))]
+  = a + λ⁻¹ × log(1 + exp(λ(b-a)))
+
+当λ→∞：
+  → b - a < 0（因为a > b）
+  → λ(b-a) → -∞
+  → exp(λ(b-a)) → 0
+  → log(1 + exp(λ(b-a))) → log(1) = 0
+  → λ⁻¹ × log(1 + ...) → 0
+
+所以：
+  λ⁻¹ RealSoftMax(λa, λb) → a = max(a, b) ✓
+
+解释：
+  → λ越大，softmax越"硬"
+  → 最大值主导，其他值被抑制
+  → 极限情况下就是真正的max函数
+```
+
+```
+问题3.4：soft-min定义
+
+类比soft-max：
+  softmax是"平滑的max"
+
+soft-min应该是"平滑的min"
+
+定义：
+  soft-min(a, b) = -soft-max(-a, -b)
+                 = -log(exp(-a) + exp(-b))
+                 = log(1/(exp(-a) + exp(-b)))
+
+或者：
+  soft-min(a, b) = log(exp(-a) + exp(-b))（负号在外）
+
+验证：
+  soft-min(a, b) < min(a, b)
+
+  因为：soft-max(-a, -b) > max(-a, -b) = -min(a, b)
+
+  所以：-soft-max(-a, -b) < min(a, b) ✓
+```
+
+```
+问题3.5：扩展到多个数
+
+多个数的soft-max：
+  softmax(a₁, a₂, ..., aₙ) = log(Σᵢ exp(a_i))
+
+性质：
+  → softmax > max(a₁, ..., aₙ)
+  → λ⁻¹ softmax(λa₁, ..., λaₙ) → max(a₁, ..., aₙ) 当λ→∞
+
+多个数的soft-min：
+  soft-min(a₁, ..., aₙ) = log(Σᵢ exp(-a_i))
+
+性质：
+  → soft-min < min(a₁, ..., aₙ)
+  → λ⁻¹ soft-min(λa₁, ..., λaₙ) → min(a₁, ..., aₙ) 当λ→∞
 ```
 
 ---
