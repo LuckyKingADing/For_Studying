@@ -2460,3 +2460,626 @@ $$\mathrm{softmin}(a_1, a_2, \ldots, a_n) = -\mathrm{softmax}(-a_1, -a_2, \ldots
 
 *文档生成时间：2026-05-07*
 *最后更新时间：2026-05-07（添加线性回归从零实现章节完整问答）*
+---
+
+## 第3章 线性网络 - softmax回归从零开始实现
+
+### softmax-regression-scratch.ipynb 问答整理
+
+#### Q1: partition = X_exp.sum(1, keepdim=True) 这行代码的含义？
+
+**解析：**
+
+```python
+partition = X_exp.sum(1, keepdim=True)
+```
+
+含义分解：
+- `X_exp.sum(1)`：沿轴1（行方向）求和
+- `keepdim=True`：保持维度不变
+
+**数值示例：**
+
+假设 X_exp 是 2×3 矩阵：
+```
+X_exp = [[2.718, 7.389, 20.086],
+         [54.598, 148.413, 403.429]]
+
+执行 X_exp.sum(1, keepdim=True)：
+按行求和：
+  → 第0行：2.718 + 7.389 + 20.086 = 30.193
+  → 第1行：54.598 + 148.413 + 403.429 = 606.440
+
+结果 partition 形状：(2, 1)
+partition = [[30.193],
+             [606.440]]
+```
+
+**keepdim=True vs False 对比：**
+
+```
+keepdim=True：
+  结果形状：(2, 1) 二维张量
+  partition = [[30.193], [606.440]]
+
+keepdim=False：
+  结果形状：(2,) 一维张量
+  result = [30.193, 606.440]
+```
+
+**为什么需要 keepdim=True？**
+
+为了广播除法！
+
+```
+X_exp 形状：(2, 3)
+partition 形状：(2, 1) ← keepdim=True
+
+X_exp / partition：
+  → (2, 3) / (2, 1) 可以广播
+  → partition 自动扩展为 (2, 3)
+  → 每一列都除以同一行的和
+
+如果 keepdim=False：
+  → partition 形状为 (2,)
+  → (2, 3) / (2,) 会出错
+```
+
+---
+
+#### Q2: 高级索引 y_hat[[0, 1], y] 的含义？
+
+**解析：**
+
+```python
+y = torch.tensor([0, 2])
+y_hat = torch.tensor([[0.1, 0.3, 0.6], 
+                      [0.3, 0.2, 0.5]])
+y_hat[[0, 1], y]
+```
+
+**数据结构：**
+
+```
+y_hat 是 2×3 矩阵：
+        列0   列1   列2
+       ┌─────┬─────┬─────┐
+行0 →  │ 0.1 │ 0.3 │ 0.6 │
+       ├─────┼─────┼─────┤
+行1 →  │ 0.3 │ 0.2 │ 0.5 │
+       └─────┴─────┴─────┘
+
+y = [0, 2]
+  → 样本0的真实类别是0
+  → 样本1的真实类别是2
+```
+
+**索引语法：**
+
+```
+y_hat[[0, 1], y]
+
+第一个列表 [0, 1]：指定行索引
+第二个列表 y：指定列索引
+
+逐对组合：
+  → (行0, 列y[0]) = (行0, 列0) → 取 0.1
+  → (行1, 列y[1]) = (行1, 列2) → 取 0.5
+
+结果：tensor([0.1, 0.5])
+```
+
+**用途：**
+
+取出每个样本"正确类别"的预测概率，用于计算交叉熵损失。
+
+---
+
+#### Q3: cross_entropy 函数解析
+
+```python
+def cross_entropy(y_hat, y):
+    return - torch.log(y_hat[range(len(y_hat)), y])
+```
+
+**逐步执行：**
+
+```
+输入：
+  y = [0, 2]
+  y_hat = [[0.1, 0.3, 0.6], [0.3, 0.2, 0.5]]
+
+步骤1：range(len(y_hat)) = [0, 1]
+
+步骤2：y_hat[[0, 1], [0, 2]]
+  → 取出 [0.1, 0.5]
+
+步骤3：torch.log([0.1, 0.5]) = [-2.3026, -0.6931]
+
+步骤4：取负号
+  → [2.3026, 0.6931]
+
+结果：tensor([2.3026, 0.6931])
+
+含义：
+  → 样本0损失：2.3026（预测概率0.1很低）
+  → 样本1损失：0.6931（预测概率0.5中等）
+```
+
+---
+
+#### Q4: evaluate_accuracy 函数解析
+
+```python
+def evaluate_accuracy(net, data_iter):
+    if isinstance(net, torch.nn.Module):
+        net.eval()
+    metric = Accumulator(2)
+    with torch.no_grad():
+        for X, y in data_iter:
+            metric.add(accuracy(net(X), y), y.numel())
+    return metric[0] / metric[1]
+```
+
+**执行流程示例：**
+
+```
+假设 test_iter 有3个批次：
+
+批次0：256张图像，正确预测25个
+  → metric.add(25, 256)
+  → metric.data = [25, 256]
+
+批次1：256张图像，正确预测30个
+  → metric.add(30, 256)
+  → metric.data = [55, 512]
+
+批次2：128张图像，正确预测10个
+  → metric.add(10, 128)
+  → metric.data = [65, 640]
+
+最终精度：
+  metric[0] / metric[1] = 65 / 640 = 0.1016
+```
+
+---
+
+#### Q5: isinstance 检查的作用
+
+```python
+if isinstance(net, torch.nn.Module):
+if isinstance(updater, torch.optim.Optimizer):
+```
+
+**目的：兼容两种实现方式**
+
+```
+方式A：从零开始实现
+  → net 是自定义函数，不是 torch.nn.Module
+  → isinstance(net, torch.nn.Module) = False
+  → updater 是自定义函数，不是 torch.optim.Optimizer
+
+方式B：使用PyTorch API
+  → net 是 nn.Sequential，是 torch.nn.Module
+  → isinstance(net, torch.nn.Module) = True
+  → updater 是 torch.optim.SGD，是 torch.optim.Optimizer
+
+分支处理：
+  if isinstance(updater, torch.optim.Optimizer):
+      updater.zero_grad()      # PyTorch内置优化器
+      l.mean().backward()
+      updater.step()
+  else:
+      l.sum().backward()       # 自定义优化器
+      updater(X.shape[0])
+```
+
+---
+
+#### Q6: net(X) 是什么模型？
+
+**解析：**
+
+```python
+def net(X):
+    return softmax(torch.matmul(X.reshape((-1, W.shape[0])), W) + b)
+```
+
+net 是自定义函数，实现 softmax 回归模型。
+
+**计算流程：**
+
+```
+输入 X：(batch_size, 1, 28, 28)
+
+↓ reshape
+展平：(batch_size, 784)
+
+↓ matmul(X, W)
+线性变换：(batch_size, 10)
+
+↓ + b
+加偏置：(batch_size, 10)
+
+↓ softmax
+概率输出：(batch_size, 10)
+
+数学公式：ŷ = softmax(W·x + b)
+```
+
+---
+
+#### Q7: Accumulator 类解析
+
+```python
+class Accumulator:
+    def __init__(self, n):
+        self.data = [0.0] * n
+
+    def add(self, *args):
+        self.data = [a + float(b) for a, b in zip(self.data, args)]
+
+    def __getitem__(self, idx):
+        return self.data[idx]
+```
+
+**使用示例：**
+
+```
+metric = Accumulator(3)  # 3个累加变量
+初始：metric.data = [0.0, 0.0, 0.0]
+
+批次1：损失=50，正确=25，样本=256
+  metric.add(50, 25, 256)
+  → metric.data = [50.0, 25.0, 256.0]
+
+批次2：损失=45，正确=30，样本=256
+  metric.add(45, 30, 256)
+  → metric.data = [95.0, 55.0, 512.0]
+
+访问：
+  metric[0] = 95.0（总损失）
+  metric[1] = 55.0（总正确数）
+  metric[2] = 512.0（总样本数）
+```
+
+---
+
+### softmax-regression-scratch.ipynb 练习解答
+
+#### 练习1：softmax函数的数值问题
+
+**数值溢出：**
+
+```
+当输入值很大时：
+  exp(100) ≈ 2.69 × 10^43  # 超出float32范围
+  exp(1000) = inf
+
+softmax计算：
+  inf / inf = NaN（无法计算）
+```
+
+**数值下溢：**
+
+```
+当输入值很小时：
+  exp(-1000) ≈ 0
+  0 / 0 = NaN
+```
+
+---
+
+#### 练习2：交叉熵损失函数的问题
+
+**对数定义域问题：**
+
+```
+当预测概率 ŷ_j = 0 时：
+  L = -log(0) = inf
+  
+导致训练不稳定、梯度爆炸
+```
+
+---
+
+#### 练习3：解决方案
+
+**Log-Softmax技巧：**
+
+```
+减去最大值防止溢出：
+
+log-softmax(x_j) = x_j - max(x) - log(Σ_k exp(x_k - max(x)))
+
+优势：
+  → exp(x_k - max(x)) ≤ 1，不会溢出
+  → 数值稳定
+
+PyTorch内置：
+  loss = nn.CrossEntropyLoss()
+  # 内部已实现LogSumExp技巧
+```
+
+---
+
+#### 练习4：最大概率标签是否总是最优？
+
+**医疗诊断场景：**
+
+```
+预测概率：[癌症:0.51, 健康:0.49]
+
+问题：
+  → 两种概率几乎相等
+  → 模型不确定
+  → 但硬性输出单一诊断
+
+更好的方案：
+  → 置信度阈值：最大概率<0.7时输出"不确定"
+  → 多标签输出：提供多种可能性
+  → 风险权重：根据错误代价调整阈值
+```
+
+---
+
+#### 练习5：词汇表过大问题
+
+**问题：**
+
+```
+语言模型词汇量：100,000+
+
+softmax计算复杂度：O(V)
+  → 每次预测需要计算100,000个exp
+  → 内存和计算开销巨大
+```
+
+**解决方案：**
+
+```
+1. 分层Softmax：复杂度O(log V)
+2. 负采样：只计算正样本+少量负样本
+3. 子词分割(BPE)：词汇表可控
+4. 词汇表缩减：保留高频词
+```
+
+---
+
+## 第3章 线性网络 - softmax回归简洁实现
+
+### softmax-regression-concise.ipynb 问答整理
+
+#### Q1: nn.Flatten() 的作用
+
+**解析：**
+
+```python
+net = nn.Sequential(nn.Flatten(), nn.Linear(784, 10))
+```
+
+nn.Flatten() 将输入展平为二维张量：
+
+```
+输入：(batch_size, 1, 28, 28)
+输出：(batch_size, 784)
+
+保留第0维（batch_size）
+合并其他所有维度
+```
+
+---
+
+#### Q2: nn.Sequential 的作用
+
+**顺序堆叠多个层：**
+
+```
+nn.Sequential(
+    nn.Flatten(),      # 第0层
+    nn.Linear(784, 10) # 第1层
+)
+
+数据流：
+  输入 → Flatten → Linear → 输出
+```
+
+---
+
+#### Q3: 权重初始化
+
+```python
+def init_weights(m):
+    if type(m) == nn.Linear:
+        nn.init.normal_(m.weight, std=0.01)
+
+net.apply(init_weights)
+```
+
+**net.apply() 执行流程：**
+
+```
+遍历Sequential中的所有层：
+  → 第0层Flatten：无参数，不执行初始化
+  → 第1层Linear：执行 nn.init.normal_(m.weight, std=0.01)
+```
+
+---
+
+#### Q4: 数值稳定性 - LogSumExp技巧
+
+**问题：**
+
+```
+softmax函数：ŷ_j = exp(o_j) / Σ_k exp(o_k)
+
+当 o_k 很大：
+  exp(o_k) = inf → 溢出
+```
+
+**解决方案：减去最大值**
+
+```
+ŷ_j = exp(o_j - max(o)) / Σ_k exp(o_k - max(o))
+
+数学等价，但数值稳定：
+  → o_j - max(o) ≤ 0
+  → exp(o_j - max(o)) ≤ 1
+  → 不会溢出
+```
+
+**Log-Softmax推导：**
+
+```
+log(ŷ_j) = o_j - max(o) - log(Σ_k exp(o_k - max(o)))
+
+关键：不需要计算exp(o_j)，直接使用o_j
+```
+
+---
+
+#### Q5: CrossEntropyLoss 的实现
+
+```python
+loss = nn.CrossEntropyLoss(reduction='none')
+```
+
+**内部机制：**
+
+```
+输入：未归一化的预测(logits)
+不需要先计算softmax
+内部实现LogSumExp技巧
+自动处理数值稳定性
+```
+
+---
+
+#### Q6: 优化器 torch.optim.SGD
+
+```python
+trainer = torch.optim.SGD(net.parameters(), lr=0.1)
+```
+
+**工作流程：**
+
+```
+训练循环：
+  trainer.zero_grad()  # 清空梯度
+  l.backward()         # 计算梯度
+  trainer.step()       # 更新参数
+
+net.parameters() 返回：
+  → Linear层的weight和bias
+  → 自动管理梯度
+```
+
+---
+
+### softmax-regression-concise.ipynb 练习解答
+
+#### 练习1：调整超参数的效果
+
+**批量大小影响：**
+
+```
+| batch_size | 每周期批次数 | 最终精度 |
+|-----------|------------|---------|
+| 32        | 1875       | 约84%   |
+| 256       | 235        | 约82%   |
+| 512       | 118        | 约80%   |
+```
+
+**学习率影响：**
+
+```
+| lr    | 收敛速度 | 训练稳定性 |
+|------|---------|-----------|
+| 0.01 | 很慢    | 稳定      |
+| 0.1  | 中等    | 稳定      |
+| 0.5  | 快      | 震荡      |
+| 1.0  | 发散    | 失败      |
+```
+
+---
+
+#### 练习2：过拟合问题与解决方案
+
+**现象：**
+
+```
+训练精度上升：85% → 92% → 95%
+测试精度下降：82% → 79% → 75%
+
+train-test gap 越来越大
+```
+
+**解决方案：**
+
+```
+1. 早停(Early Stopping)：
+   → 监控测试精度
+   → 不再提升时停止训练
+
+2. 权重衰减(L2正则化)：
+   trainer = torch.optim.SGD(
+       net.parameters(),
+       lr=0.1,
+       weight_decay=0.001
+   )
+
+3. 学习率衰减：
+   scheduler = torch.optim.lr_scheduler.StepLR(
+       trainer, step_size=10, gamma=0.5
+   )
+
+4. 数据增强：
+   → 旋转、平移图像
+   → 增加数据多样性
+```
+
+---
+
+## 第4章 多层感知机 - 章节概述
+
+### chapter_multilayer-perceptrons/index.ipynb 问答整理
+
+**章节结构（10个小节）：**
+
+```
+核心模型部分：
+  1. mlp.ipynb - 多层感知机理论
+  2. mlp-scratch.ipynb - 从零实现MLP
+  3. mlp-concise.ipynb - MLP简洁实现
+
+正则化技术部分：
+  4. underfit-overfit.ipynb - 过拟合与欠拟合
+  5. weight-decay.ipynb - 权重衰减
+  6. dropout.ipynb - 暂退法
+
+训练技术部分：
+  7. backprop.ipynb - 反向传播
+  8. numerical-stability-and-init.ipynb - 数值稳定性
+
+实战应用部分：
+  9. environment.ipynb - 环境和分布偏移
+  10. kaggle-house-price.ipynb - Kaggle房价预测
+```
+
+**关键演进：**
+
+```
+softmax回归 → 多层感知机
+
+关键区别：
+  → softmax回归：单层、线性变换
+  → MLP：多层、非线性激活函数
+
+添加：
+  → 隐藏层
+  → 激活函数(ReLU等)
+  → 深度增加 → 能力增强
+```
+
+---
+
