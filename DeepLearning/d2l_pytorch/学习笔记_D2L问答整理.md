@@ -3562,3 +3562,301 @@ apply的作用：
 
 ---
 
+
+---
+
+## 模型选择、欠拟合和过拟合 (underfit-overfit.ipynb)
+
+---
+
+### Q: 多项式回归数据生成代码解析
+
+```python
+max_degree = 20  # 多项式的最大阶数
+n_train, n_test = 100, 100  # 训练和测试数据集大小
+true_w = np.zeros(max_degree)  # 分配大量的空间
+true_w[0:4] = np.array([5, 1.2, -3.4, 5.6])
+
+features = np.random.normal(size=(n_train + n_test, 1))
+np.random.shuffle(features)
+poly_features = np.power(features, np.arange(max_degree).reshape(1, -1))
+for i in range(max_degree):
+    poly_features[:, i] /= math.gamma(i + 1)  # gamma(n)=(n-1)!
+# labels的维度:(n_train+n_test,)
+labels = np.dot(poly_features, true_w)
+labels += np.random.normal(scale=0.1, size=labels.shape)
+```
+
+**逐行解析：**
+
+```
+max_degree = 20：
+  → 最多支持20阶多项式特征
+  → x^0, x^1, x^2, ..., x^19
+
+true_w设置：
+  → 初始化全0向量（长度20）
+  → 只有前4个元素非零：[5, 1.2, -3.4, 5.6]
+  → 这意味着真实模型是3阶多项式！
+  → y = 5 + 1.2x - 3.4x²/2! + 5.6x³/3!
+
+features生成：
+  → 200个样本，每个样本1个特征值x
+  → 从正态分布采样（均值0，方差1）
+  → shuffle打乱顺序（避免训练集测试集分布不均）
+
+poly_features计算：
+  → 每个x生成20个多项式特征
+  → [x^0, x^1, x^2, ..., x^19]
+  → reshape(1, -1)把[0,1,2,...,19]变成行向量
+  → np.power实现广播：每个x乘上所有阶数
+
+除以阶乘（关键步骤）：
+  → gamma(n) = (n-1)!
+  → gamma(i+1) = i!
+  → 目的：避免高阶特征数值爆炸
+  → x^10可能很大，但x^10/10!就可控了
+
+labels计算：
+  → 真实值 = 多项式特征 × 权重
+  → 加上噪声（scale=0.1，标准差0.1）
+```
+
+---
+
+### Q: features[:2], poly_features[:2, :], labels[:2] 输出解析
+
+**输出结果：**
+
+```python
+features[:2] = [[0.0434], [1.9729]]  # 两个样本的x值
+
+poly_features[:2, :] = 
+  [[1.0000e+00, 4.3430e-02, 9.4310e-04, ...],   # 第1个样本的20个特征
+   [1.0000e+00, 1.9729e+00, 1.9463e+00, ...]]   # 第2个样本的20个特征
+
+labels[:2] = [5.0307, 8.0391]  # 两个样本的标签y
+```
+
+**逐个解释：**
+
+```
+features[:2]：
+  → 第1个样本：x = 0.0434（很小的数）
+  → 第2个样本：x = 1.9729（较大的数）
+
+poly_features第1行（x=0.0434）：
+  → x^0/0! = 1（永远为1，偏置项）
+  → x^1/1! = 0.0434
+  → x^2/2! = 0.0434²/2 = 0.00094（很小）
+  → 高阶项更小，几乎为0
+
+poly_features第2行（x=1.9729）：
+  → x^0/0! = 1
+  → x^1/1! = 1.9729
+  → x^2/2! = 1.9729²/2 = 1.946（中等）
+  → x^3/3! = 1.9729³/6 = 1.28（中等）
+  → 高阶项逐渐衰减
+
+labels计算验证：
+  → 第1个：5*1 + 1.2*0.0434 - 3.4*0.00094 + 5.6*0.000014 ≈ 5.03
+  → 第2个：5*1 + 1.2*1.9729 - 3.4*1.946 + 5.6*1.28 ≈ 8.04
+  → 加上噪声后略有偏差
+```
+
+---
+
+### Q: evaluate_loss函数解析
+
+```python
+def evaluate_loss(net, data_iter, loss):
+    """评估给定数据集上模型的损失"""
+    metric = d2l.Accumulator(2)  # 损失的总和,样本数量
+    for X, y in data_iter:
+        out = net(X)
+        y = y.reshape(out.shape)
+        l = loss(out, y)
+        metric.add(l.sum(), l.numel())
+    return metric[0] / metric[1]
+```
+
+**解析：**
+
+```
+metric = Accumulator(2)：
+  → 创建一个累加器，存储2个值
+  → 第1个：损失总和
+  → 第2个：样本总数
+
+for循环遍历数据：
+  → 分批处理（避免内存不足）
+  → 每批获取X（特征）和y（标签）
+
+net(X)：
+  → 前向传播，获取预测值out
+
+y.reshape(out.shape)：
+  → 调整标签形状匹配预测值
+  → 如out是(10,1)，y也要变成(10,1)
+
+loss(out, y)：
+  → 计算预测值和真实值的损失
+  → 返回每个样本的损失（向量）
+
+metric.add(l.sum(), l.numel())：
+  → l.sum()：当前批次的总损失
+  → l.numel()：当前批次的样本数
+
+return metric[0] / metric[1]：
+  → 平均损失 = 总损失/总样本数
+```
+
+---
+
+### Q: train函数解析
+
+```python
+def train(train_features, test_features, train_labels, test_labels,
+          num_epochs=400):
+    loss = nn.MSELoss(reduction='none')
+    input_shape = train_features.shape[-1]
+    net = nn.Sequential(nn.Linear(input_shape, 1, bias=False))
+    batch_size = min(10, train_labels.shape[0])
+    ...
+```
+
+**逐行解析：**
+
+```
+loss = nn.MSELoss(reduction='none')：
+  → 均方误差损失
+  → reduction='none'：不自动求平均/求和
+  → 返回每个样本的损失值
+
+input_shape = train_features.shape[-1]：
+  → 特征数量（多项式阶数+1）
+  → 如选前4个特征，input_shape=4
+
+net = nn.Sequential(nn.Linear(input_shape, 1, bias=False))：
+  → 单层线性网络
+  → 输入：多项式特征
+  → 输出：预测值y
+  → bias=False：不需要额外偏置（x^0项已经提供）
+
+batch_size = min(10, train_labels.shape[0])：
+  → 每批最多10个样本
+  → 如果样本数<10，就用实际样本数
+
+DataLoader创建：
+  → load_array将数据封装成迭代器
+  → shuffle=True：训练集随机打乱
+  → is_train=False：测试集不打乱
+
+trainer = torch.optim.SGD(net.parameters(), lr=0.01)：
+  → 随机梯度下降优化器
+  → 学习率0.01
+
+Animator可视化：
+  → xlabel='epoch'：横轴是训练轮次
+  → yscale='log'：纵轴用对数尺度（损失变化大）
+  → legend=['train', 'test']：显示两条曲线
+
+训练循环：
+  → 每个epoch训练一次
+  → 每20个epoch记录一次损失
+  → 同时评估训练损失和测试损失
+```
+
+---
+
+### Q: 正常拟合情况解析（前4个维度）
+
+```python
+# 从多项式特征中选择前4个维度，即1,x,x^2/2!,x^3/3!
+train(poly_features[:n_train, :4], poly_features[n_train:, :4],
+      labels[:n_train], labels[n_train:])
+```
+
+**解析：**
+
+```
+为什么选前4个维度？
+
+真实权重 true_w 只有前4个非零：
+  true_w = [5, 1.2, -3.4, 5.6, 0, 0, 0, ...]
+           ↓  ↓    ↓    ↓
+           x⁰ x¹  x²   x³
+
+对应的多项式：
+  y = 5 + 1.2x - 3.4x² + 5.6x³
+
+数据划分：
+  poly_features[:n_train, :4]  → 训练集前100样本，前4特征
+  poly_features[n_train:, :4]  → 测试集后100样本，前4特征
+  labels[:n_train]             → 训练标签
+  labels[n_train:]             → 测试标签
+
+为什么效果好？
+  模型复杂度 = 数据复杂度（完美匹配）
+  
+  真实模型：y = 5 + 1.2x - 3.4x² + 5.6x³
+  训练模型：y = w₀ + w₁x + w₂x² + w₃x³
+  
+  → 参数数量刚好（不多不少）
+  → 训练误差低（能学到真实模式）
+  → 测试误差低（泛化能力强）
+
+预期输出：
+  训练损失快速下降并稳定
+  测试损失也很低
+  两者差距小 → 没有过拟合/欠拟合
+```
+
+---
+
+### Q: 欠拟合和过拟合的区别？
+
+**三种情况对比：**
+
+```
+正常拟合（4个特征）：
+  → 模型复杂度匹配数据复杂度
+  → 训练损失低，测试损失低
+  → 泛化能力强
+
+欠拟合（2个特征）：
+  → 模型过于简单（只用x和常数项）
+  → 无法捕捉数据的非线性关系
+  → 训练损失高，测试损失也高
+  → 解决方案：增加模型复杂度
+
+过拟合（20个特征）：
+  → 模型过于复杂
+  → 训练损失很低（甚至接近0）
+  → 测试损失很高
+  → 学到了噪声而非真实模式
+  → 解决方案：增加数据量/正则化
+```
+
+---
+
+### Q: 练习解答要点总结
+
+**练习1：多项式回归精确解**
+  → 可用正规方程 w = (X^T X)^(-1) X^T y 精确求解
+  → 条件：样本数 ≥ 特征数
+
+**练习2：模型选择分析**
+  → 训练损失随复杂度单调递减
+  → 测试损失呈U型曲线
+  → 最佳复杂度在拐点处
+
+**练习3：特征标准化**
+  → 不标准化会导致数值爆炸
+  → 除以阶乘保持量级可控
+
+**练习4：泛化误差为零**
+  → 理论上可能（无噪声+正确模型）
+  → 实际中不可达（噪声存在+分布未知）
+
+---
